@@ -41,18 +41,17 @@ exports.pagBancatlan = onRequest(async (request, response) => {
   const loans = await db
     .collection("loans")
     .where("user", "==", user.id)
-    .where("status", "==", "signed")
+    .where("estado", "==", "firmado")
     .get();
   const loan = loans.docs.at(0);
   const loanData = loan.data();
-  const amountToPay = request.body.amount;
+  const monto = request.body.amount;
   // DONE: agregar nuevo pago
   // DONE: actualizar prestamo: fecha de ultimo pago
   await db.doc(`loans/${loan.id}`).set({
     ...loanData,
-    balance: loanData.balance - amountToPay,
-    lastPayment: new Date(),
-    payments: [...loanData.payments, { amount: amountToPay, date: new Date() }],
+    balance: loanData.balance - monto,
+    transacciones: [...loanData.transacciones, { monto, fecha: new Date() }],
   });
   response.json({ msg: "Loan Updated" });
 });
@@ -67,7 +66,7 @@ exports.conBancatlan = onRequest(async (request, response) => {
   const db = getFirestore();
   const users = await db
     .collection("users")
-    .where("dni", "==", request.body.dni)
+    .where("DNI", "==", request.body.dni)
     .get();
   if (!users.size) {
     response.json({
@@ -81,7 +80,7 @@ exports.conBancatlan = onRequest(async (request, response) => {
   const loan = await db
     .collection("loans")
     .where("user", "==", user.id)
-    .where("status", "==", "signed")
+    .where("status", "==", "firmado")
     .get();
   response.json({
     loan: loan.docs.at(0).data(),
@@ -96,37 +95,51 @@ exports.initBancatlan = onRequest(async (request, response) => {
       "7befa197c574d117525e58145f906417fc40f054fc10d7c863250751caa6ccca",
   });
   const user = await db.collection("users").add({
-    names: "Roberto Carlos Castillo Castellanos",
-    dni: "0703200101235",
+    nombres: "Roberto Carlos Castillo Castellanos",
+    DNI: "0703200101235",
     email: "robertocastillo945@gmail.com",
-    phoneNumber: "+50488137603",
-    createdAt: new Date(),
+    phone_number: "+50488137603",
+    created_time: new Date(),
   });
   // const user = (await db.collection("users").get()).docs.at(0);
+  // plazos en quincenas
+  const Plazos = 6 * 2;
+  const Cuota = 1000;
+  const CalendarioPagos = [
+    { monto: Cuota, fecha: new Date("9/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("9/30/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("10/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("10/30/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("11/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("11/30/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("12/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("12/30/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("01/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("01/30/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("02/15/2023"), recibido: false },
+    { monto: Cuota, fecha: new Date("02/30/2023"), recibido: false },
+  ];
+
   await db.collection("loans").add({
-    amount: 100000,
-    quota: 1000,
-    rate: 0.17,
-    mora: 0,
-    balance: 99000,
-    terms: 6,
-    paymentsSchedule: [
+    Monto: 100000,
+    Cuota,
+    Tasa: 0.17,
+    Mora: 0,
+    Balance: 99000,
+    Plazos,
+    CalendarioPagos,
+    Transacciones: [
       {
-        amount: 1000,
-        date: new Date(),
+        monto: 1000,
+        fecha: new Date(),
       },
     ],
-    payments: [
-      {
-        amount: 1000,
-        date: new Date(),
-      },
-    ],
-    firstPayment: new Date(),
-    lastPayment: new Date(),
-    createdAt: new Date(),
+    fecha_primer_pago: new Date(),
+    fecha_ultimo_pago: new Date(),
+    fechaCreado: new Date(),
+    fechaFirma: new Date(),
     user: user.id,
-    status: "signed",
+    status: "firmado",
   });
   response.json({ msg: "initialized" });
 });
