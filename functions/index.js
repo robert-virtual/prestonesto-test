@@ -9,8 +9,12 @@
 
 const { onRequest } = require("firebase-functions/v2/https");
 const logger = require("firebase-functions/logger");
-const { getFirestore } = require("firebase-admin/firestore");
+const { getFirestore, Timestamp } = require("firebase-admin/firestore");
 const { initializeApp } = require("firebase-admin/app");
+const ONE_DAY_IN_MILIS = 1000 * 60 * 60 * 24;
+const FIFTEEN_DAYS_IN_MILIS = ONE_DAY_IN_MILIS * 15;
+
+const { FirestoreDataConverter } = require("firebase-admin/firestore");
 
 // Create and deploy your first functions
 
@@ -59,33 +63,89 @@ exports.pagBancatlan = onRequest(async (request, response) => {
 // consular saldo
 exports.conBancatlan = onRequest(async (request, response) => {
   logger.info("Consulta", { structuredData: true });
-  const authenticaed = await auth(request, response);
-  if (!authenticaed) {
-    return;
-  }
   const db = getFirestore();
-  const users = await db
-    .collection("users")
-    .where("DNI", "==", request.body.dni)
-    .get();
-  if (!users.size) {
+
+  try {
+    const authenticaed = await auth(request, response);
+    if (!authenticaed) {
+      return;
+    }
+    const users = await db
+      .collection("users")
+      .where("DNI", "==", request.body.dni)
+      .get();
+    if (!users.size) {
+      response.status(400).json({
+        error: "Cliente no encontrado",
+        errorDet: "El DNI proveido no conincide con ningun cliente",
+      });
+      return;
+    }
+    const user = users.docs.at(0);
+    //TODO: obtener prestamo
+    /**
+     * @type {FirestoreDataConverter<{Mora:number,CalendarioPagos:{fechaVencimiento:Date,recibido:boolean,monto:number}[]}>}
+     */
+    const converter = {
+      fromFirestore(snapshop) {
+        const data = snapshop.data();
+        return {
+          Monto: data.Monto,
+          Cuota: data.Cuota,
+          Tasa: data.Tasa,
+          Mora: data.Mora,
+          Balance: data.Balance,
+          Plazos: data.Plazos,
+          CalendarioPagos: data.CalendarioPagos.map((pago) => ({
+            ...pago,
+            fechaVencimiento: new Date(pago.fechaVencimiento.seconds * 1000),
+          })),
+          Transacciones: data.Transacciones,
+          fecha_primer_pago: data.fecha_primer_pago,
+          fecha_ultimo_pago: data.fecha_ultimo_pago,
+          fechaCreado: data.fechaCreado,
+          fechaFirma: data.fechaFirma,
+          user: data.user,
+          status: data.status,
+        };
+      },
+      toFirestore(data) {
+        return data;
+      },
+    };
+    const loanQuery = await db
+      .collection("loans")
+      .withConverter(converter)
+      .where("user", "==", user.id)
+      .where("status", "==", "firmado")
+      .get();
+    const loan = loanQuery.docs.at(0).data();
+    const pagos = loan.CalendarioPagos.filter(
+      (pago) =>
+        pago.fechaVencimiento.getTime() <
+          new Date().getTime() + FIFTEEN_DAYS_IN_MILIS && !pago.recibido
+    );
+    const conceptos = pagos.map((pago, idx) => ({
+      id: idx + 1,
+      monto: pago.monto,
+    }));
+    if (loan.Mora) {
+      conceptos.push({ id: conceptos.length + 1, monto: loan.Mora });
+    }
     response.json({
-      error: "Cliente no encontrado",
-      errorDet: "El DNI proveido no conincide con ningun cliente",
+      saldos: [
+        {
+          conceptos,
+        },
+      ],
+      user: users.docs.at(0).data(),
     });
-    return;
+  } catch (error) {
+    response.status(500).json({
+      error: error.message,
+      errorDet: error.message,
+    });
   }
-  const user = users.docs.at(0);
-  //TODO: obtener prestamo
-  const loan = await db
-    .collection("loans")
-    .where("user", "==", user.id)
-    .where("status", "==", "firmado")
-    .get();
-  response.json({
-    loan: loan.docs.at(0).data(),
-    user: users.docs.at(0).data(),
-  });
 });
 
 exports.initBancatlan = onRequest(async (request, response) => {
@@ -106,18 +166,76 @@ exports.initBancatlan = onRequest(async (request, response) => {
   const Plazos = 6 * 2;
   const Cuota = 1000;
   const CalendarioPagos = [
-    { monto: Cuota, fecha: new Date("9/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("9/30/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("10/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("10/30/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("11/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("11/30/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("12/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("12/30/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("01/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("01/30/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("02/15/2023"), recibido: false },
-    { monto: Cuota, fecha: new Date("02/30/2023"), recibido: false },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-08-15T24:00:00"),
+      recibido: true,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-08-30T24:00:00"),
+      recibido: true,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-09-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-09-30T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-10-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-10-30T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-11-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-11-30T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-12-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2023-12-30T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2024-01-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2024-01-30T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2024-02-15T24:00:00"),
+      recibido: false,
+    },
+    {
+      monto: Cuota,
+      fechaVencimiento: new Date("2024-02-28T24:00:00"),
+      recibido: false,
+    },
   ];
 
   await db.collection("loans").add({
