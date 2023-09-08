@@ -75,10 +75,11 @@ const CalendarioPagos = [
 ];
 
 //obtener pagos de los proximos 15 dias
-const pagos = CalendarioPagos.filter(
-  (pago) =>
-    pago.fechaVencimiento.getTime() <
-      new Date().getTime() + FIFTEEN_DAYS_IN_MILIS && !pago.recibido
-);
+// const pagos = CalendarioPagos.filter(
+//   (pago) =>
+//     pago.fechaVencimiento.getTime() <
+//       new Date().getTime() + FIFTEEN_DAYS_IN_MILIS && !pago.recibido
+// );
 
+const pagos = CalendarioPagos.filter((pago) => pago.recibido);
 console.log(pagos);

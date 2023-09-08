@@ -15,6 +15,37 @@ const ONE_DAY_IN_MILIS = 1000 * 60 * 60 * 24;
 const FIFTEEN_DAYS_IN_MILIS = ONE_DAY_IN_MILIS * 15;
 
 const { FirestoreDataConverter } = require("firebase-admin/firestore");
+const { onSchedule } = require("firebase-functions/v2/scheduler");
+/**
+ * @type {FirestoreDataConverter<{Monto:number,Tasa:number,Mora:number,CalendarioPagos:{fechaVencimiento:Date,recibido:boolean,monto:number}[]}>}
+ */
+const loanConverter = {
+  fromFirestore(snapshop) {
+    const data = snapshop.data();
+    return {
+      Monto: data.Monto,
+      Cuota: data.Cuota,
+      Tasa: data.Tasa,
+      Mora: data.Mora,
+      Balance: data.Balance,
+      Plazos: data.Plazos,
+      CalendarioPagos: data.CalendarioPagos.map((pago) => ({
+        ...pago,
+        fechaVencimiento: new Date(pago.fechaVencimiento.seconds * 1000),
+      })),
+      Transacciones: data.Transacciones,
+      fecha_primer_pago: data.fecha_primer_pago,
+      fecha_ultimo_pago: data.fecha_ultimo_pago,
+      fechaCreado: data.fechaCreado,
+      fechaFirma: data.fechaFirma,
+      user: data.user,
+      status: data.status,
+    };
+  },
+  toFirestore(data) {
+    return data;
+  },
+};
 
 // Create and deploy your first functions
 
@@ -66,6 +97,10 @@ exports.conBancatlan = onRequest(async (request, response) => {
   const db = getFirestore();
 
   try {
+    const consulta = await db.collection("consultas").add({
+      DNI: request.body.dni,
+      date: new Date(),
+    });
     const authenticaed = await auth(request, response);
     if (!authenticaed) {
       return;
@@ -82,41 +117,10 @@ exports.conBancatlan = onRequest(async (request, response) => {
       return;
     }
     const user = users.docs.at(0);
-    //TODO: obtener prestamo
-    /**
-     * @type {FirestoreDataConverter<{Mora:number,CalendarioPagos:{fechaVencimiento:Date,recibido:boolean,monto:number}[]}>}
-     */
-    const converter = {
-      fromFirestore(snapshop) {
-        const data = snapshop.data();
-        return {
-          Monto: data.Monto,
-          Cuota: data.Cuota,
-          Tasa: data.Tasa,
-          Mora: data.Mora,
-          Balance: data.Balance,
-          Plazos: data.Plazos,
-          CalendarioPagos: data.CalendarioPagos.map((pago) => ({
-            ...pago,
-            fechaVencimiento: new Date(pago.fechaVencimiento.seconds * 1000),
-          })),
-          Transacciones: data.Transacciones,
-          fecha_primer_pago: data.fecha_primer_pago,
-          fecha_ultimo_pago: data.fecha_ultimo_pago,
-          fechaCreado: data.fechaCreado,
-          fechaFirma: data.fechaFirma,
-          user: data.user,
-          status: data.status,
-        };
-      },
-      toFirestore(data) {
-        return data;
-      },
-    };
     const loanQuery = await db
       .collection("loans")
-      .withConverter(converter)
-      .where("user", "==", user.id)
+      .withConverter(loanConverter)
+      .where("UserDocReference", "==", user.ref)
       .where("status", "==", "firmado")
       .get();
     const loan = loanQuery.docs.at(0).data();
@@ -125,19 +129,28 @@ exports.conBancatlan = onRequest(async (request, response) => {
         pago.fechaVencimiento.getTime() <
           new Date().getTime() + FIFTEEN_DAYS_IN_MILIS && !pago.recibido
     );
+    // un concepto por cada pago pendiente
     const conceptos = pagos.map((pago, idx) => ({
-      id: idx + 1,
-      monto: pago.monto,
+      TrSVNu: idx + 1,
+      TrSVMo: pago.monto,
     }));
+    // un concepto mas en caso de existir mora
     if (loan.Mora) {
-      conceptos.push({ id: conceptos.length + 1, monto: loan.Mora });
+      conceptos.push({ TrSVNu: conceptos.length + 1, TrSVMo: loan.Mora });
     }
+    const fechaVencimiento = pagos.at(0).fechaVencimiento;
     response.json({
-      saldos: [
-        {
-          conceptos,
-        },
-      ],
+      saldo: {
+        IdConsulta: consulta.id,
+        TrSSaV: formatDate(fechaVencimiento),
+        TrSFeV: formatDate(fechaVencimiento),
+        TrSCom: "Comentario",
+        TrSPaM: "LPS",
+        TrSVaM: "LPS",
+        TrSPaR: loan.CalendarioPagos.filter((pago) => pago.recibido).length,
+        conceptos,
+      },
+
       user: users.docs.at(0).data(),
     });
   } catch (error) {
@@ -148,6 +161,49 @@ exports.conBancatlan = onRequest(async (request, response) => {
   }
 });
 
+const PromisePool = require("es6-promise-pool").default;
+const MAX_CONCURRENT = 3;
+exports.checkMora = onSchedule("every day 00:00", async (event) => {
+  const promisePool = new PromisePool(async () => {
+    const db = getFirestore();
+    const loansQuery = await db
+      .collection("loans")
+      .withConverter(loanConverter)
+      .get();
+    const loans = loansQuery.docs.map((loan) => ({
+      ...loan.data(),
+      id: loan.id,
+    }));
+    const loansWithMora = loans.filter((loan) => {
+      const pagosPendientes = loan.CalendarioPagos.filter(
+        (pago) =>
+          pago.fechaVencimiento.getTime() < new Date().getTime() &&
+          !pago.recibido
+      );
+      return pagosPendientes.length > 0;
+    });
+    loansWithMora.forEach((loan) => {
+      db.doc("/loans/" + loan.id).update({
+        Mora: loan.Mora + loan.Cuota * loan.TasaMora,
+      });
+    });
+  }, MAX_CONCURRENT);
+  await promisePool.start();
+  logger.log("Verificando Mora de deudas");
+});
+
+function formatDate(date = new Date()) {
+  return `${date.getFullYear()}-${prepend0(date.getMonth() + 1)}-${prepend0(
+    date.getDate()
+  )}`;
+}
+function prepend0(n) {
+  if (`${n}`.length == 1) {
+    return `0${n}`;
+  }
+  return n;
+}
+
 exports.initBancatlan = onRequest(async (request, response) => {
   const db = getFirestore();
   await db.doc("_rowy_/settings").set({
@@ -155,12 +211,14 @@ exports.initBancatlan = onRequest(async (request, response) => {
       "7befa197c574d117525e58145f906417fc40f054fc10d7c863250751caa6ccca",
   });
   const user = await db.collection("users").add({
-    nombres: "Roberto Carlos Castillo Castellanos",
+    nombres: "Roberto Carlos",
+    apellidos: "Castillo Castellanos",
     DNI: "0703200101235",
     email: "robertocastillo945@gmail.com",
     phone_number: "+50488137603",
     created_time: new Date(),
   });
+  await user.update({ uid: user.id });
   // const user = (await db.collection("users").get()).docs.at(0);
   // plazos en quincenas
   const Plazos = 6 * 2;
@@ -256,7 +314,7 @@ exports.initBancatlan = onRequest(async (request, response) => {
     fecha_ultimo_pago: new Date(),
     fechaCreado: new Date(),
     fechaFirma: new Date(),
-    user: user.id,
+    UserDocReference: user,
     status: "firmado",
   });
   response.json({ msg: "initialized" });
